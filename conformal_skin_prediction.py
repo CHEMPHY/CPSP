@@ -34,6 +34,7 @@ from rdkit.Chem import Descriptors
 
 import numpy as np
 from numpy.core.numeric import asanyarray
+from numpy import mean
 
 from nonconformist.icp import IcpRegressor
 from nonconformist.nc import NormalizedRegressorNc
@@ -47,6 +48,7 @@ from sklearn.metrics import r2_score
 from sklearn.metrics import mean_absolute_error
 
 from math import sqrt
+
 import random
 
 import matplotlib
@@ -60,7 +62,7 @@ import seaborn as sns
 parser = argparse.ArgumentParser()
 parser.add_argument('-verbose', help='Get verbose output', action='store_true')
 parser.add_argument('-i','-infile', help='Define the input file. Default:baba_jan_2015_smiles.csv', default='C:\Users\Martin\Documents\Magnus_Lundborg\Nya_data/baba_jan_2015_smiles.csv')
-parser.add_argument('-c','-conformal_model', action='store_true',  help='Create a new conformal predictions model')
+parser.add_argument('-c','-conformal_model', action ='store_true',  help='Create a new conformal predictions model')
 parser.add_argument('-m', '-model_type', default = 'RF', help = 'Define model algorithm, RF (default) or SVM')
 parser.add_argument('-t', '-test_set', default='random', help = 'Use: random (default), full_model, existing, reference')
 parser.add_argument('-p', '-predict_model', action='store_true', help="Predict values for one or many smile-codes using single conformal model")
@@ -68,6 +70,8 @@ parser.add_argument('-p', '-predict_model', action='store_true', help="Predict v
 parser.add_argument('-d','-data_file_name', help='Output file name. File with descriptor data', default='data_with_descriptors.csv')
 parser.add_argument('-num_models', default='100', help='Number of models to create. Default = 100')
 parser.add_argument('-reference', default=1, help='Use this reference as test_set. Default= 1')
+parser.add_argument('-significance', default=0.2, help='Set the significance level of the conformal prediction. Default = 0.2')
+parser.add_argument('-phys','-physiochemical_descriptors', default = False, help='Print out data about descriptors. Default = false')
 
 args = parser.parse_args()
 
@@ -203,9 +207,9 @@ def create_indices_test_training_calibration(data):
         if args.verbose:
             print('Creating random sets')
         idx = np.random.permutation(len(data))
-        train = idx[:int(idx.size * 3 / 5)]
-        calibrate = idx[int(idx.size * 3 / 5):int(4 * idx.size / 5 )]
-        test = idx[int(4 * idx.size / 5):]
+        train = idx[:int(idx.size * 3 / 5)+1]
+        calibrate = idx[int(idx.size * 3 / 5)+1:int(4 * idx.size / 5 )+1]
+        test = idx[int(4 * idx.size / 5)+1:]
     
 
         
@@ -276,7 +280,7 @@ def randomize_new_indices(train_i, calibrate_i, test_i, data, i):
     """
     #print('################## Setup new training and calibration and indices ##########')
     
-    if args.t == 'random' or args.t == 'reference':
+    if  args.t == 'reference':                # or args.t == 'random':
 
             
         a = []    
@@ -293,7 +297,7 @@ def randomize_new_indices(train_i, calibrate_i, test_i, data, i):
                         
         A = a + b + c
 
-    if args.t == 'full_model' or args.t == 'existing':
+    if args.t == 'full_model' or args.t == 'existing' or args.t == 'random':
 
         a = []    
         for each in train_i:
@@ -309,10 +313,17 @@ def randomize_new_indices(train_i, calibrate_i, test_i, data, i):
 
     if args.t == 'random':
 
-        train = idx[:int(idx.size * 3 / 5)]
-        calibrate = idx[int(idx.size * 3 / 5):int(4 * idx.size / 5 )]
-        test = idx[int(4 * idx.size / 5):]
-    
+        #train = idx[:int(idx.size * 3 / 5)]
+        #calibrate = idx[int(idx.size * 3 / 5):int(4 * idx.size / 5 )]
+        #test = idx[int(4 * idx.size / 5):]
+        
+        #NEW RANDOM
+        train = idx[:int(idx.size * 4 / 5)]
+        calibrate = idx[int(4 * idx.size / 5):]
+        test = test_i     
+
+     
+
     if args.t == 'full_model' or args.t == 'existing':
         train = idx[:int(idx.size * 4 / 5)]
         calibrate = idx[int(4 * idx.size / 5):]
@@ -320,7 +331,7 @@ def randomize_new_indices(train_i, calibrate_i, test_i, data, i):
     
     if args.t == 'reference':        
   
-        test = data.loc[data['Ref.'] ==  int(i) % data['Ref.'].max()].index.tolist()
+        test = data.loc[data['Ref.'] ==  (int(i) % data['Ref.'].max() + 1)].index.tolist()
   
         blob = data.loc[data['Ref.'] != int(i)].index.tolist()
         calibrate = random.sample(blob, int(len(blob)*0.2))
@@ -328,9 +339,11 @@ def randomize_new_indices(train_i, calibrate_i, test_i, data, i):
 
 
         if args.verbose:
-            #print('Creating new test set from reference: '+str(i))
+            #For DEBUG
+            #print('Creating new test set from reference: '+str((int(i) % data['Ref.'].max() + 1)))
             #print('Compounds in new test set: '+str(test))
             pass
+            
    
     return list(train), list(calibrate), list(test)
       
@@ -349,13 +362,14 @@ def calculate_prediction_y_and_error(median_values):
     
 
 def create_conformal_model():
+
     #Read data from file
     data = read_data(args.i)
-
 	
-    #Calculate descriptors using RD-kut
+    #Calculate descriptors using RD-kit
     descriptors_df = calculate_descriptors(data['smiles']) 
     
+    #Assign indices
     train_i, calibrate_i, test_i  = create_indices_test_training_calibration(data) # Create indices for test,training, calibration sets          
     test_index_total = [x for x in test_i]
     calibrate_index_total = [x for x in calibrate_i]
@@ -364,8 +378,10 @@ def create_conformal_model():
    
     if args.m == 'RF':
         icp = IcpRegressor(NormalizedRegressorNc(RandomForestRegressor, KNeighborsRegressor, abs_error, abs_error_inv, model_params={'n_estimators': 100}))
+
     if args.m == 'SVM':
         #No support vector regressor
+        print('error - no SVM-regressor avliable')
         icp = IcpRegressor(NormalizedRegressorNc(SupportVectorRegressor, KNeighborsRegressor, abs_error, abs_error_inv, model_params={'n_estimators': 100}))
            
     #Create DataFrames to store data
@@ -386,12 +402,13 @@ def create_conformal_model():
 
         #Create nornal model
         icp.fit(Xtrain, ytrain)
+    
         #Calibrate normal model               
         icp.calibrate(asanyarray(Xcalibrate), asanyarray(ycalibrate))
             
         #Predrict test and training sets
-        prediction_test = icp.predict(asanyarray(Xtest), significance = 0.2) # 0.2
-        prediction_calibrate = icp.predict(asanyarray(Xcalibrate), significance = 0.2)
+        prediction_test = icp.predict(asanyarray(Xtest), significance = args.significance) # 0.2
+        prediction_calibrate = icp.predict(asanyarray(Xcalibrate), significance = args.significance)
 
         #Create DF with data
         blob = pandas.DataFrame(prediction_test, index=test_i)
@@ -407,6 +424,7 @@ def create_conformal_model():
         #Create new indices for next model
         test_index_total = np.unique(np.concatenate((test_index_total, test_i), axis=0))
         calibrate_index_total = np.unique(np.concatenate((calibrate_index_total, calibrate_i), axis=0)) 
+        
         train_i, calibrate_i, test_i  = randomize_new_indices(train_i, calibrate_i, test_i, data, i)
         
     
@@ -420,10 +438,10 @@ def create_conformal_model():
     C['median_prediction_0'] = A.median(axis=1)
     C['median_prediction_1'] = B.median(axis=1)
     C['median_prediction'] = (C['median_prediction_0'] + C['median_prediction_1'])/2
-    C['median_prediction_error'] = C['median_prediction'] - C['median_prediction_0']
+    C['median_prediction_size'] = C['median_prediction'] - C['median_prediction_0']
 
     Y_pred_median_test = C['median_prediction'].dropna()
-    error_median_test = C['median_prediction_error'].dropna().tolist()
+    median_prediction_size = C['median_prediction_size'].dropna().tolist()
         
     num_outside_median = 0
     for i in range(len(data)):
@@ -440,10 +458,10 @@ def create_conformal_model():
     iC['median_prediction_0'] = iA.median(axis=1)
     iC['median_prediction_1'] = iB.median(axis=1)
     iC['median_prediction'] = (iC['median_prediction_0'] + iC['median_prediction_1'])/2
-    iC['median_prediction_error'] = iC['median_prediction'] - iC['median_prediction_0']
-
+    iC['median_prediction_size'] = iC['median_prediction'] - iC['median_prediction_0']
+    
     iY_pred_median_test = iC['median_prediction'].dropna()
-    ierror_median_test = iC['median_prediction_error'].dropna().tolist()
+    imedian_prediction_size = iC['median_prediction_size'].dropna().tolist()
 
     inum_outside_median = 0
     for i in range(len(data)):
@@ -463,17 +481,20 @@ def create_conformal_model():
     
     print('Number of compounds predicted in test set: '+ str(C['median_prediction'].notnull().sum()))   
          
+    ex_r2_score= r2_score(experimental_values, Y_pred_median_test)
+    print('R^2 (coefficient of determination):  %.3f' % ex_r2_score)
+
     ex_mean_squared_error = mean_squared_error(experimental_values, Y_pred_median_test)
-    print('Mean squared error: %.3f' % ex_mean_squared_error)
-        
     ex_rmse = sqrt(ex_mean_squared_error)               
     print('RMSE:  %.3f' % ex_rmse)
         
-    ex_r2_score= r2_score(experimental_values, Y_pred_median_test)
-    print('R^2 (coefficient of determination):  %.3f' % ex_r2_score)
-        
     ex_MAE = mean_absolute_error(experimental_values, Y_pred_median_test)
     print('Mean absolute error:  %.3f' % ex_MAE)
+ 
+    print('Mean squared error: %.3f' % ex_mean_squared_error)
+
+    #Average prediction range   
+    print('Mean of median prediction range: %.3f' % mean(median_prediction_size))
 
     percent_num_outside_median = 100*float(num_outside_median)/float(len(experimental_values))
     print('Number of compounds outside of prediction range: '+str(num_outside_median))
@@ -484,17 +505,23 @@ def create_conformal_model():
     
     print('Number of compounds predicted in training set: '+ str(iC['median_prediction'].notnull().sum()))   
          
+    iex_r2_score= r2_score(iexperimental_values, iY_pred_median_test)
+    print('R^2 (coefficient of determination):  %.3f' % iex_r2_score)
+
     iex_mean_squared_error = mean_squared_error(iexperimental_values, iY_pred_median_test)
-    print('Mean squared error: %.3f' % iex_mean_squared_error)
-        
     iex_rmse = sqrt(iex_mean_squared_error)               
     print('RMSE:  %.3f' % iex_rmse)
         
-    iex_r2_score= r2_score(iexperimental_values, iY_pred_median_test)
-    print('R^2 (coefficient of determination):  %.3f' % iex_r2_score)
+    print('Mean squared error: %.3f' % iex_mean_squared_error)
         
+       
     iex_MAE = mean_absolute_error(iexperimental_values, iY_pred_median_test)
     print('Mean absolute error:  %.3f' % iex_MAE)
+
+    #Average prediction range   
+    print('Mean of median prediction range: %.3f' % mean(imedian_prediction_size))
+
+
 
     ipercent_num_outside_median = 100*float(inum_outside_median)/float(len(iexperimental_values))
     print('Number of compounds outside of prediction range: '+str(inum_outside_median))
@@ -506,7 +533,7 @@ def create_conformal_model():
         print(' ################ Plotting testset #################')
     fig, ax = plt.subplots()
 
-    ax.errorbar(experimental_values, Y_pred_median_test, yerr=error_median_test,
+    ax.errorbar(experimental_values, Y_pred_median_test, yerr=median_prediction_size,
     fmt='o', markeredgecolor = 'black', markersize = 6,
     mew=1, ecolor='black', elinewidth=0.3, capsize = 3, capthick=1, errorevery = 1)
     
@@ -516,7 +543,7 @@ def create_conformal_model():
     
 
     # Plot title and lables
-    plt.title('Median predictions with prediction ranges for the testset')
+    #plt.title('Median predictions with prediction ranges for the testset')
     plt.ylabel('Predicted log Kp')
     plt.xlabel('Experimental log Kp')
     
@@ -530,27 +557,37 @@ def create_conformal_model():
     #ax.plot(x, fit[0]*asanyarray(x)+ fit[1], color='black')
     
 
+    
     #Creating colored dots for ref 10
-    ref10_experimental = data.loc[data['Ref.'] == 10]['Observed']
-    ref10_predicted = C['median_prediction'][ref10_experimental.index]
-    #print(ref10_experimental, ref10_predicted)    
-    #fig, ax2 = plt.subplots()
-    ax.scatter(ref10_experimental, ref10_predicted,marker = 'o', color ='red', s = 100)
-
-
+    
+    #ref10_experimental = data.loc[data['Ref.'] == 10]['Observed']
+    #ref10_predicted = C['median_prediction'][ref10_experimental.index]
+    #ax.scatter(ref10_experimental, ref10_predicted,marker = 'o', color ='red', s = 100)
+    
 
 
     ax.plot(x, x, color='black')
     
     plt.show()
 
-    #Skriv ut data
+    #Print data in CSV-file
     
     descriptors_df['Median prediction low range'] = C['median_prediction_0']
     descriptors_df['Median prediction high range'] = C['median_prediction_1'] 
     descriptors_df['Median prediction'] = C['median_prediction']
-    descriptors_df['size prediction range'] = C['median_prediction'] - C['median_prediction_0']
+    descriptors_df['size prediction range'] = C['median_prediction_1'] - C['median_prediction_0']
     write_csv_with_data(data,descriptors_df, args.d)
+
+
+    #Calculate min, max and mean values for descriptors
+    if args.phys:
+        print(args.phys)
+        print('Min: ')
+        print(descriptors_df.min())
+        print('Max: ')
+        print(descriptors_df.max())
+        print('Mean:')    
+        print(descriptors_df.mean()) 
 
 
 # -----------------------------------------------------------------------------
