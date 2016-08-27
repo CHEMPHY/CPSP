@@ -28,7 +28,7 @@ import argparse
 
 import pandas
 from pandas import DataFrame
-
+import rdkit
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 
@@ -36,12 +36,14 @@ import numpy as np
 from numpy.core.numeric import asanyarray
 from numpy import mean
 
+import nonconformist
 from nonconformist.icp import IcpRegressor
 from nonconformist.nc import NormalizedRegressorNc
 from nonconformist.nc import RegressorNc, abs_error, abs_error_inv
 
 import sklearn
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.svm import SVR
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.metrics import r2_score
@@ -56,6 +58,9 @@ import matplotlib.pyplot as plt
 
 import seaborn as sns
 
+import dill
+
+import copy
 
 # -----------------------------------------------------------------------------
 
@@ -72,7 +77,7 @@ parser.add_argument('-num_models', default='100', help='Number of models to crea
 parser.add_argument('-reference', default=1, help='Use this reference as test_set. Default= 1')
 parser.add_argument('-significance', default=0.2, help='Set the significance level of the conformal prediction. Default = 0.2')
 parser.add_argument('-phys','-physiochemical_descriptors', default = False, help='Print out data about descriptors. Default = false')
-
+parser.add_argument('-smile', default = 'CCO', help ='Smiles for which skin permeabillity prediction is requested')
 args = parser.parse_args()
 
 # -----------------------------------------------------------------------------
@@ -87,7 +92,9 @@ if args.verbose:
     print('pandas version: {}'.format(pandas.__version__))
     print('sklearn version: {}'.format(sklearn.__version__))
     print('numpy version: {}'.format(np.__version__))
-    print('')
+    print('rdkit version: {}'.format(rdkit.__version__))
+    print('nonconformist version: {}'.format(nonconformist.__version__))
+    print('dill version: {}'.format(dill.__version__))
 
 
 # -----------------------------------------------------------------------------
@@ -360,6 +367,83 @@ def calculate_prediction_y_and_error(median_values):
     #print(len(Y_pred_median))
     return Y_pred_median, error_median
     
+def save_models(ICPs):
+    """
+    Description - Saves the classifiers using dill
+    """
+    if args.verbose:
+        print('########################## Save Classifiers ##########################')
+    
+    outfile = 'filename.pkl'
+    with open(outfile, 'wb') as out_strm: 
+        s = dill.dump(ICPs, out_strm)
+
+    return True 
+
+
+def load_models():
+    """
+    Description - Load a previosly saved classifier from file using dill
+    """
+    if args.verbose:
+        print('########################## Load Classifier ##########################')
+    
+    infile = 'filename.pkl'
+    with open(infile, 'rb') as in_strm:
+        icps = dill.load(in_strm)
+ 
+    return icps
+
+def predict_from_smiles_conformal_median(classifier_list, smiles):
+    """
+    Description - Predict value of penetration (kp) from a SMILES-description'
+    of a molecule using the median of multiple conformal models.
+    """
+    print('########## Predict using multiple conformal models ##############')
+    
+    print smiles
+    
+    descriptors_df= calculate_descriptors(smiles)
+    Xvalues = []
+    Xvalues = asanyarray(descriptors_df.iloc[:,1:])
+    
+    print(len(Xvalues))
+   
+    A = pandas.DataFrame(index = range(len(Xvalues)))
+    B = pandas.DataFrame(index = range(len(Xvalues)))
+    C = pandas.DataFrame(index = range(len(Xvalues)))
+
+
+    index = list(xrange(len(smiles)))
+
+    i = 0    
+    for classifier in classifier_list:
+        
+        predicted_skin_permiabillity = classifier.predict(Xvalues, significance = 0.2)
+        predicted_values = pandas.DataFrame(predicted_skin_permiabillity)
+
+        A[i] = predicted_values[0]
+        B[i] = predicted_values[1]     
+        
+        i +=1 
+        #print(predicted_values) DEBUG
+
+    C['median_prediction_0'] = A.median(axis=1)
+    C['median_prediction_1'] = B.median(axis=1)
+    C['median_prediction'] = (C['median_prediction_0'] + C['median_prediction_1'])/2
+    C['median_prediction_size'] = C['median_prediction'] - C['median_prediction_0']
+
+    #Y_pred_median_test = C['median_prediction'].dropna()
+    #median_prediction_size = C['median_prediction_size'].dropna().tolist()
+           
+    if args.verbose:
+        print('Number of conformal models used: '+ str(i))
+        print('Predicted range (first entry): '+str(C['median_prediction_0'][0])+' to '+str(C['median_prediction_1'][0]))
+        print('Predicted value (first entry): '+str(C['median_prediction'][0]))
+        print('Predicted range (first entry): '+str(C['median_prediction_size'][0]))
+    #print('Predicted range (second entry): '+str(C['median_prediction_0'][1])+' - '+str(C['median_prediction_1'][1]))
+
+    return C
 
 def create_conformal_model():
 
@@ -382,7 +466,7 @@ def create_conformal_model():
     if args.m == 'SVM':
         #No support vector regressor
         print('error - no SVM-regressor avliable')
-        icp = IcpRegressor(NormalizedRegressorNc(SupportVectorRegressor, KNeighborsRegressor, abs_error, abs_error_inv, model_params={'n_estimators': 100}))
+        icp = IcpRegressor(NormalizedRegressorNc(SVR, KNeighborsRegressor, abs_error, abs_error_inv, model_params={'n_estimators': 100}))
            
     #Create DataFrames to store data
     A = pandas.DataFrame(index = range(len(data)))
@@ -397,6 +481,9 @@ def create_conformal_model():
 	print('Number of models to create: '+args.num_models)
 	print('############## Starting calculations ##############')
     
+    icp_s = []
+
+
     for i in range(int(args.num_models)): #DEBUG 100
         Xtrain, Xtest, Xcalibrate, ytrain, ytest, ycalibrate = create_train_test_calibrate_sets(data, descriptors_df,  train_i, calibrate_i, test_i)
 
@@ -413,7 +500,7 @@ def create_conformal_model():
         #Create DF with data
         blob = pandas.DataFrame(prediction_test, index=test_i)
         iblob = pandas.DataFrame(prediction_calibrate, index=calibrate_i)
-
+        
         A[i] = blob[0]
         B[i] = blob[1]
 
@@ -427,7 +514,16 @@ def create_conformal_model():
         
         train_i, calibrate_i, test_i  = randomize_new_indices(train_i, calibrate_i, test_i, data, i)
         
+        #temp = sklearn.base.clone(icp)
+        icp_s.append(copy.copy(icp))
     
+
+    ### Save models ###
+    save_models(icp_s)
+    
+
+ 
+
     if args.verbose:
         print('################## Loop finished, model created, test set predicted #################')
         
@@ -479,96 +575,99 @@ def create_conformal_model():
         print('########################## Prediction statistics external test ##########################')
         print('')
     
+
+       
     print('Number of compounds predicted in test set: '+ str(C['median_prediction'].notnull().sum()))   
-         
-    ex_r2_score= r2_score(experimental_values, Y_pred_median_test)
-    print('R^2 (coefficient of determination):  %.3f' % ex_r2_score)
-
-    ex_mean_squared_error = mean_squared_error(experimental_values, Y_pred_median_test)
-    ex_rmse = sqrt(ex_mean_squared_error)               
-    print('RMSE:  %.3f' % ex_rmse)
-        
-    ex_MAE = mean_absolute_error(experimental_values, Y_pred_median_test)
-    print('Mean absolute error:  %.3f' % ex_MAE)
- 
-    print('Mean squared error: %.3f' % ex_mean_squared_error)
-
-    #Average prediction range   
-    print('Mean of median prediction range: %.3f' % mean(median_prediction_size))
-
-    percent_num_outside_median = 100*float(num_outside_median)/float(len(experimental_values))
-    print('Number of compounds outside of prediction range: '+str(num_outside_median))
-    print('% of compounds predicted outside of prediction range: '+str(percent_num_outside_median) +' %')
-    print(' ')
-
-    #####Internal Prediction ########
     
-    print('Number of compounds predicted in training set: '+ str(iC['median_prediction'].notnull().sum()))   
-         
-    iex_r2_score= r2_score(iexperimental_values, iY_pred_median_test)
-    print('R^2 (coefficient of determination):  %.3f' % iex_r2_score)
+    if args.t != 'full_model':         
+        ex_r2_score= r2_score(experimental_values, Y_pred_median_test)
+        print('R^2 (coefficient of determination):  %.3f' % ex_r2_score)
 
-    iex_mean_squared_error = mean_squared_error(iexperimental_values, iY_pred_median_test)
-    iex_rmse = sqrt(iex_mean_squared_error)               
-    print('RMSE:  %.3f' % iex_rmse)
+        ex_mean_squared_error = mean_squared_error(experimental_values, Y_pred_median_test)
+        ex_rmse = sqrt(ex_mean_squared_error)               
+        print('RMSE:  %.3f' % ex_rmse)
         
-    print('Mean squared error: %.3f' % iex_mean_squared_error)
+        ex_MAE = mean_absolute_error(experimental_values, Y_pred_median_test)
+        print('Mean absolute error:  %.3f' % ex_MAE)
+ 
+        print('Mean squared error: %.3f' % ex_mean_squared_error)
+
+        #Average prediction range   
+        print('Mean of median prediction range: %.3f' % mean(median_prediction_size))
+
+        percent_num_outside_median = 100*float(num_outside_median)/float(len(experimental_values))
+        print('Number of compounds outside of prediction range: '+str(num_outside_median))
+        print('% of compounds predicted outside of prediction range: '+str(percent_num_outside_median) +' %')
+        print(' ')
+
+        #####Internal Prediction ########
+    
+        print('Number of compounds predicted in training set: '+ str(iC['median_prediction'].notnull().sum()))   
+          
+        iex_r2_score= r2_score(iexperimental_values, iY_pred_median_test)
+        print('R^2 (coefficient of determination):  %.3f' % iex_r2_score)
+
+        iex_mean_squared_error = mean_squared_error(iexperimental_values, iY_pred_median_test)
+        iex_rmse = sqrt(iex_mean_squared_error)               
+        print('RMSE:  %.3f' % iex_rmse)
+        
+        print('Mean squared error: %.3f' % iex_mean_squared_error)
         
        
-    iex_MAE = mean_absolute_error(iexperimental_values, iY_pred_median_test)
-    print('Mean absolute error:  %.3f' % iex_MAE)
+        iex_MAE = mean_absolute_error(iexperimental_values, iY_pred_median_test)
+        print('Mean absolute error:  %.3f' % iex_MAE)
 
-    #Average prediction range   
-    print('Mean of median prediction range: %.3f' % mean(imedian_prediction_size))
-
-
-
-    ipercent_num_outside_median = 100*float(inum_outside_median)/float(len(iexperimental_values))
-    print('Number of compounds outside of prediction range: '+str(inum_outside_median))
-    print('% of compounds predicted outside of prediction range: '+str(ipercent_num_outside_median) +' %')
-    print(' ')   
-
-    #### Plot results - plot test set
-    if args.verbose:
-        print(' ################ Plotting testset #################')
-    fig, ax = plt.subplots()
-
-    ax.errorbar(experimental_values, Y_pred_median_test, yerr=median_prediction_size,
-    fmt='o', markeredgecolor = 'black', markersize = 6,
-    mew=1, ecolor='black', elinewidth=0.3, capsize = 3, capthick=1, errorevery = 1)
-    
-    #Set the size
-    ax.set_ylim([-10,-3])
-    ax.set_xlim([-10,-3])
-    
-
-    # Plot title and lables
-    #plt.title('Median predictions with prediction ranges for the testset')
-    plt.ylabel('Predicted log Kp')
-    plt.xlabel('Experimental log Kp')
-    
-    # Draw line 
-    fit = np.polyfit(experimental_values, Y_pred_median_test, 1)
-    
-    x = [-10,-3]
-    
-    #Regression line
-    #ax.plot(experimental_values, fit[0]*asanyarray(experimental_values)+ fit[1], color='black')
-    #ax.plot(x, fit[0]*asanyarray(x)+ fit[1], color='black')
-    
-
-    
-    #Creating colored dots for ref 10
-    
-    #ref10_experimental = data.loc[data['Ref.'] == 10]['Observed']
-    #ref10_predicted = C['median_prediction'][ref10_experimental.index]
-    #ax.scatter(ref10_experimental, ref10_predicted,marker = 'o', color ='red', s = 100)
-    
+        #Average prediction range   
+        print('Mean of median prediction range: %.3f' % mean(imedian_prediction_size))
 
 
-    ax.plot(x, x, color='black')
+
+        ipercent_num_outside_median = 100*float(inum_outside_median)/float(len(iexperimental_values))
+        print('Number of compounds outside of prediction range: '+str(inum_outside_median))
+        print('% of compounds predicted outside of prediction range: '+str(ipercent_num_outside_median) +' %')
+        print(' ')   
+
+        #### Plot results - plot test set
+        if args.verbose:
+            print(' ################ Plotting testset #################')
+        fig, ax = plt.subplots()
+
+        ax.errorbar(experimental_values, Y_pred_median_test, yerr=median_prediction_size,
+        fmt='o', markeredgecolor = 'black', markersize = 6,
+        mew=1, ecolor='black', elinewidth=0.3, capsize = 3, capthick=1, errorevery = 1)
     
-    plt.show()
+        #Set the size
+        ax.set_ylim([-10,-3])
+        ax.set_xlim([-10,-3])
+    
+
+        # Plot title and lables
+        #plt.title('Median predictions with prediction ranges for the testset')
+        plt.ylabel('Predicted log Kp')
+        plt.xlabel('Experimental log Kp')
+    
+        # Draw line 
+        fit = np.polyfit(experimental_values, Y_pred_median_test, 1)
+    
+        x = [-10,-3]
+    
+        #Regression line
+        #ax.plot(experimental_values, fit[0]*asanyarray(experimental_values)+ fit[1], color='black')
+        #ax.plot(x, fit[0]*asanyarray(x)+ fit[1], color='black')
+    
+
+    
+        #Creating colored dots for ref 10
+    
+        #ref10_experimental = data.loc[data['Ref.'] == 10]['Observed']
+        #ref10_predicted = C['median_prediction'][ref10_experimental.index]
+        #ax.scatter(ref10_experimental, ref10_predicted,marker = 'o', color ='red', s = 100)
+    
+
+
+        ax.plot(x, x, color='black')
+    
+        plt.show()
 
     #Print data in CSV-file
     
@@ -600,15 +699,25 @@ if args.verbose:
     #print(parser)
 
 
-if args.verbose:
-    print(' Input data file: ')
-    print(' '+args.i) # i = input_file
+
     
 if args.c:
+    #Create conformal models
+    if args.verbose:
+        print(' Input data file: ')
+        print(' '+args.i) # i = input_file
+
     create_conformal_model()
-    pass
        
 if args.p:
-    print('No conformal model found')
+    if args.verbose:
+        print('Predict using earlier models')
+    try:
+        classifier_list = load_models()
+    except:
+        print('No conformal model found')
+    
+    smile_code = [args.smile] #args.smiles
+    predict_from_smiles_conformal_median(classifier_list, smile_code)
     
     
