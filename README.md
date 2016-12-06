@@ -1,4 +1,4 @@
-# CPSP -Conformal Prediction of Skin Permiabillity
+# CPSP - Conformal Prediction of Skin Permiabillity
 A python script that uses conformal prediction to predict skin permeability (log Kp).
 
 The script uses SMILES to describe chemicals. 
