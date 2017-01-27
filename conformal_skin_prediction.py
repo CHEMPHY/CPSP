@@ -6,17 +6,23 @@ __doc__ = """ Description:
 With this script you can create and predict conformal models
 of skin penetration.
 
-The data is imported from a .csv file seperated using ;
+The data is imported from a .csv file separated using ;
 Default option is to include data from Baba et al. 2015
+
+DOI: 10.1007/s11095-015-1629-y
+
 The csv file includes the columns:
 Compounds - compound names
-Observed - Experimental value for skin perimabillity (log Kp)
-Ref - Number that maps the experimental value to a refrence article
-smiles - Smiles code that caractericies the compound
+Observed - Experimental value for skin permeability (log Kp)
+Ref - Number that maps the experimental value to a reference article
+smiles - Smiles code that characterizes the compound
 
-Use the flag -verbose to get 
+Use the flag -verbose to get output with descriptions.
 
-Conformal predicdion is used to calculate prediction ranges
+Conformal prediction is used to calculate prediction ranges
+
+
+sklearn.neighbors.KNeighborsRegressor used K = 5 (default setting)
 
 Martin Lindh 2016
 """
@@ -28,6 +34,7 @@ import argparse
 
 import pandas
 from pandas import DataFrame
+
 import rdkit
 from rdkit import Chem
 from rdkit.Chem import Descriptors
@@ -48,6 +55,8 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.metrics import r2_score
 from sklearn.metrics import mean_absolute_error
+from sklearn.decomposition import PCA
+from sklearn import preprocessing
 
 from math import sqrt
 
@@ -71,28 +80,30 @@ parser.add_argument('-c','-conformal_model', action ='store_true',  help='Create
 parser.add_argument('-m', '-model_type', default = 'RF', help = 'Define model algorithm, RF (default) or SVM')
 parser.add_argument('-t', '-test_set', default='random', help = 'Use: random (default), full_model, existing, reference')
 parser.add_argument('-p', '-predict_model', action='store_true', help="Predict values for one or many smile-codes using single conformal model")
-#parser.add_argument('-v', '-validate' , action='store_true')
 parser.add_argument('-d','-data_file_name', help='Output file name. File with descriptor data', default='data_with_descriptors.csv')
 parser.add_argument('-num_models', default='100', help='Number of models to create. Default = 100')
 parser.add_argument('-reference', default=1, help='Use this reference as test_set. Default= 1')
 parser.add_argument('-significance', default=0.2, help='Set the significance level of the conformal prediction. Default = 0.2')
 parser.add_argument('-phys','-physiochemical_descriptors', default = False, help='Print out data about descriptors. Default = false')
-parser.add_argument('-smile', default = 'CCO', help ='Smiles for which skin permeabillity prediction is requested')
+parser.add_argument('-smile', default = 'CCO', help ='Smiles for which skin permeability prediction is requested')
+parser.add_argument('-plot', action ='store_true',  help='Plot experimental versus predicted')
+
+parser.add_argument('-pca','-PCA', action ='store_true',  help='Create a PCA')
 args = parser.parse_args()
 
 # -----------------------------------------------------------------------------
 
 
-#Plot version numbers for Python, matplotlib, pandas and numby
+#Plot version numbers for Python, matplotlib, pandas and numpy
 if args.verbose:
     print(' ')
     print(' ################### Versions ################### ')
     print('Python version:\n{}'.format(sys.version))
-    print('matplot lib version: {}'.format(matplotlib.__version__))
+    print('matplotlib version: {}'.format(matplotlib.__version__))
     print('pandas version: {}'.format(pandas.__version__))
     print('sklearn version: {}'.format(sklearn.__version__))
     print('numpy version: {}'.format(np.__version__))
-    print('rdkit version: {}'.format(rdkit.__version__))
+    print('RDkit version: {}'.format(rdkit.__version__))
     print('nonconformist version: {}'.format(nonconformist.__version__))
     print('dill version: {}'.format(dill.__version__))
 
@@ -104,7 +115,7 @@ if args.verbose:
 
 def read_data(infile):
     """
-    Description - Reads CSV-file to create data frame
+    Description - Reads CSV-file to create a data frame (Pandas)
     """
     if args.verbose:
         print('########################## Read CSV-file to create data frame ##########################')
@@ -120,7 +131,7 @@ def read_data(infile):
     
 def calculate_descriptors(smiles):
     """
-    Description - Calculate descriptors using rdkit
+    Description - Calculate descriptors using RDkit
     smile','logP','PSA','MolWt','RingCount','HeavyAtomCount','NumRotatableBonds
     """
     
@@ -170,8 +181,8 @@ def create_indices_test_training_calibration(data):
     Description - Create training, calibration and test indices
     
     Use existing test and training set
-    (file trining)*0.8 training
-    (file trining)*0.2 calibration set
+    (file training)*0.8 training
+    (file training)*0.2 calibration set
     (file test) test
     
     Random selection - validation
@@ -179,7 +190,7 @@ def create_indices_test_training_calibration(data):
     20 % calibrate
     20 % test
 
-    Reference testset
+    Reference test-set
     x/total % 
     (total - x)*0.8 train
     (total - x)*0.2 calibration
@@ -252,11 +263,11 @@ def create_train_test_calibrate_sets(data, descriptors_df, train_i, calibrate_i,
     """
     Description - Create training and test sets. 
     
-    Creates X (descriptors) and Y (permiability) values from indices and data. 
+    Creates X (descriptors) and Y (permeability) values from indices and data. 
     """
     # print('########################## Create training and test sets. ##########################')
     
-    # Create y with permiability data
+    # Create y with permeability data
     permiability_y = data['Observed']
     ytrain = permiability_y[train_i] #DEBUG    
     ytest = permiability_y[test_i] #DEBUG
@@ -272,6 +283,10 @@ def create_train_test_calibrate_sets(data, descriptors_df, train_i, calibrate_i,
 
 
 def write_csv_with_data(data, descriptors_df, newfilename):
+    '''
+    Description - Writes a csv-file with data two data-frames
+
+    '''
     print('################## Write data to CSV-file #################')
 
     connected_data = pandas.concat([data, descriptors_df], axis=1)
@@ -355,22 +370,25 @@ def randomize_new_indices(train_i, calibrate_i, test_i, data, i):
     return list(train), list(calibrate), list(test)
       
                 
-def calculate_prediction_y_and_error(median_values):    
-    #Y-pred + osäkerhet median
+def calculate_prediction_y_and_error(median_values):
+    """
+    Description - Get median predicted values and size of prediction range
+    """    
+
     Y_pred_median = []
     error_median = []
     
     for each in median_values:
         Y_pred_median.append((each[0]+each[1])/2)
         error_median.append((abs(each[0])+abs(each[1]))/2 - abs(each[1]))
-    #print('Mean value of errors using median: ' + str(np.mean(error_median)))
-    #print(len(Y_pred_median))
+
     return Y_pred_median, error_median
     
 def save_models(ICPs):
     """
     Description - Saves the classifiers using dill
     """
+
     if args.verbose:
         print('########################## Save Classifiers ##########################')
     
@@ -385,6 +403,7 @@ def load_models():
     """
     Description - Load a previosly saved classifier from file using dill
     """
+    
     if args.verbose:
         print('########################## Load Classifier ##########################')
     
@@ -394,16 +413,17 @@ def load_models():
  
     return icps
 
-def predict_from_smiles_conformal_median(classifier_list, smiles):
+def predict_from_smiles_conformal_median(regressor_list, smiles):
     """
     Description - Predict value of penetration (kp) from a SMILES-description'
     of a molecule using the median of multiple conformal models.
     """
+    
     print('########## Predict using multiple conformal models ##############')
     
     print smiles
     
-    descriptors_df= calculate_descriptors(smiles)
+    descriptors_df = calculate_descriptors(smiles)
     Xvalues = []
     Xvalues = asanyarray(descriptors_df.iloc[:,1:])
     
@@ -417,9 +437,9 @@ def predict_from_smiles_conformal_median(classifier_list, smiles):
     index = list(xrange(len(smiles)))
 
     i = 0    
-    for classifier in classifier_list:
+    for regressor in regressor_list:
         
-        predicted_skin_permiabillity = classifier.predict(Xvalues, significance = 0.2)
+        predicted_skin_permiabillity = regressor.predict(Xvalues, significance = 0.2)
         predicted_values = pandas.DataFrame(predicted_skin_permiabillity)
 
         A[i] = predicted_values[0]
@@ -446,6 +466,9 @@ def predict_from_smiles_conformal_median(classifier_list, smiles):
     return C
 
 def create_conformal_model():
+    """
+    Description - Create conformal model - Main loop
+    """
 
     #Read data from file
     data = read_data(args.i)
@@ -628,46 +651,47 @@ def create_conformal_model():
         print(' ')   
 
         #### Plot results - plot test set
-        if args.verbose:
-            print(' ################ Plotting testset #################')
-        fig, ax = plt.subplots()
+        if args.plot:     
+            if args.verbose:
+                print(' ################ Plotting testset #################')
+            fig, ax = plt.subplots()
 
-        ax.errorbar(experimental_values, Y_pred_median_test, yerr=median_prediction_size,
-        fmt='o', markeredgecolor = 'black', markersize = 6,
-        mew=1, ecolor='black', elinewidth=0.3, capsize = 3, capthick=1, errorevery = 1)
+            ax.errorbar(experimental_values, Y_pred_median_test, yerr=median_prediction_size,
+            fmt='o', markeredgecolor = 'black', markersize = 6,
+            mew=1, ecolor='black', elinewidth=0.3, capsize = 3, capthick=1, errorevery = 1)
     
-        #Set the size
-        ax.set_ylim([-10,-3])
-        ax.set_xlim([-10,-3])
-    
-
-        # Plot title and lables
-        #plt.title('Median predictions with prediction ranges for the testset')
-        plt.ylabel('Predicted log Kp')
-        plt.xlabel('Experimental log Kp')
-    
-        # Draw line 
-        fit = np.polyfit(experimental_values, Y_pred_median_test, 1)
-    
-        x = [-10,-3]
-    
-        #Regression line
-        #ax.plot(experimental_values, fit[0]*asanyarray(experimental_values)+ fit[1], color='black')
-        #ax.plot(x, fit[0]*asanyarray(x)+ fit[1], color='black')
+            #Set the size
+            ax.set_ylim([-10,-3])
+            ax.set_xlim([-10,-3])
     
 
+            # Plot title and lables
+            #plt.title('Median predictions with prediction ranges for the testset')
+            plt.ylabel('Predicted log Kp')
+            plt.xlabel('Experimental log Kp')
     
-        #Creating colored dots for ref 10
+            # Draw line 
+            fit = np.polyfit(experimental_values, Y_pred_median_test, 1)
     
-        #ref10_experimental = data.loc[data['Ref.'] == 10]['Observed']
-        #ref10_predicted = C['median_prediction'][ref10_experimental.index]
-        #ax.scatter(ref10_experimental, ref10_predicted,marker = 'o', color ='red', s = 100)
+            x = [-10,-3]
+    
+            #Regression line
+            #ax.plot(experimental_values, fit[0]*asanyarray(experimental_values)+ fit[1], color='black')
+            #ax.plot(x, fit[0]*asanyarray(x)+ fit[1], color='black')
+    
+
+    
+            #Creating colored dots for ref 10
+    
+            #ref10_experimental = data.loc[data['Ref.'] == 10]['Observed']
+            #ref10_predicted = C['median_prediction'][ref10_experimental.index]
+            #ax.scatter(ref10_experimental, ref10_predicted,marker = 'o', color ='red', s = 100)
     
 
 
-        ax.plot(x, x, color='black')
+            ax.plot(x, x, color='black')
     
-        plt.show()
+            plt.show()
 
     #Print data in CSV-file
     
@@ -688,6 +712,61 @@ def create_conformal_model():
         print('Mean:')    
         print(descriptors_df.mean()) 
 
+    if args.pca:
+        print('Starting PCA')
+        print(descriptors_df[['logP','PSA','MolWt','RingCount','HeavyAtomCount','NumRotatableBonds']].head(3))
+        print(len(descriptors_df[['size prediction range']]))
+        
+        #Define typ of PCA
+        pca = PCA(n_components=2)
+        
+        #Select desctiptors to use in PCA
+        df_small = descriptors_df[['logP','PSA','MolWt','RingCount','HeavyAtomCount','NumRotatableBonds']]
+
+        #Convert descritor values to numeric/float
+        df_X = df_small.apply(pandas.to_numeric, errors='raise') 
+ 
+        #Scale data 
+        scaler = preprocessing.RobustScaler() #Normalizer() # MaxAbsScaler() 
+        df_X_scaled = scaler.fit_transform(df_X)
+        
+        #Calculate PCA
+        pca.fit(df_X_scaled)
+
+
+        X2 = pca.transform(df_X_scaled) #descriptors_df[['logP','PSA','MolWt','RingCount','HeavyAtomCount','NumRotatableBonds']])
+
+        #-----------------------------------------------------------
+        desc_testset_large = descriptors_df.dropna(subset = ['size prediction range'])
+
+
+        desc_testset_small = desc_testset_large[['logP','PSA','MolWt','RingCount','HeavyAtomCount','NumRotatableBonds']]
+
+        desc_testset_num = desc_testset_small.apply(pandas.to_numeric, errors='raise')
+
+        desc_testset_scaled = scaler.fit_transform(desc_testset_num)
+
+        X3 = pca.transform(desc_testset_scaled) #desc_testset[['logP','PSA','MolWt','RingCount','HeavyAtomCount','NumRotatableBonds']])
+        #-----------------------------------------------------------
+
+        #desc_testset = descriptors_df.dropna(subset = ['size prediction range'])
+        Yerr_num = desc_testset_large[['size prediction range']].apply(pandas.to_numeric, errors='coerce')
+        #print(pandas.Series(Yerr['size prediction range']))
+
+
+        yerr = list(pandas.Series(Yerr_num['size prediction range'])/4)
+
+        plt.errorbar(X3[:,0], X3[:,1], yerr=yerr ,fmt='o', markeredgecolor = 'black', markersize = 6, mew=1, ecolor='black', elinewidth=0.3, capsize = 3, capthick=1, errorevery = 1)
+
+        plt.scatter(X2[:,0], X2[:,1])
+        plt.xlabel('PC1')
+        plt.ylabel('PC2')
+
+        plt.title('PCA of descriptors')
+        plt.show()
+
+        # Percentage of variance explained for each components
+        #print('explained variance ratio (first two components): %s' % str(pca.explained_variance_ratio_))
 
 # -----------------------------------------------------------------------------
 
@@ -720,4 +799,5 @@ if args.p:
     smile_code = [args.smile] #args.smiles
     predict_from_smiles_conformal_median(classifier_list, smile_code)
     
-    
+
+   
